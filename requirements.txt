@@ -1,1 +1,6 @@
 flask
+requests
+pymongo
+dnspython
+python-dotenv
+flask-cors
