@@ -4,12 +4,18 @@ import os
 import requests
 from dotenv import load_dotenv
 from flask_cors import CORS
+import jwt
+import uuid
+from datetime import datetime, timedelta
 
 load_dotenv() 
 
 def serialize_doc(doc):
     doc["_id"] = str(doc["_id"]) 
     return doc
+
+connected_clients = []
+session_duration_threshold = timedelta(hours=1)
 
 class MongoConnector:
     def __init__(self, app, uri):
@@ -112,7 +118,54 @@ class MongoConnector:
         
 app = Flask(__name__)
 mongo_connector = MongoConnector(app, os.getenv('MONGODB_URI'))
-CORS(app, resources={r"/*": {"origins": ["http://localhost:3001"]}})
+CORS(app, supports_credentials=True, resources={r"/*": {"origins": [os.getenv('FRONTEND_URI')]}})
+
+def is_valid(sub):
+    client_list = list(filter(lambda x: getattr(x, 'uuid', None) == sub, connected_clients))
+    if len(client) == 0:
+        return False
+    print(sub)
+    print(client_list)
+    client = client_list[0]
+    current_time = datetime.now()
+    expiry_date = getattr(client, 'expiry_date', None)
+
+    if expiry_date and expiry_date > (current_time + threshold):
+        return False
+    else:
+        return update_client_session()
+
+@app.route('/session-status')
+def session_status():
+    sub_cookie = request.cookies.get('sub')
+    print(sub_cookie)
+    if sub_cookie and is_valid(sub_cookie):
+        return jsonify({'session': 'active'})
+    else:
+        return jsonify({'session': 'inactive'}), 401
+
+@app.route('/logout')
+def logout():
+    response = make_response(redirect(f'{os.getenv("FRONTEND_URI")}/'))
+    response.set_cookie('sub', '', expires=0, httponly=True, secure=True, samesite='Lax')
+    return response
+
+def update_client_session(uuid):
+    for client in connected_clients:
+        if getattr(client, 'uuid', None) == uuid:
+            new_expiry_time = datetime.now() + session_duration_threshold
+            client.expiry_date = new_expiry_time
+            print(f"Updated expiry_date for client {uuid} to {new_expiry_time}")
+            return True
+    return False
+
+def add_client_session(sub):
+    expiry_date = datetime.now() + session_duration_threshold
+    entry = {
+        'uuid': sub,
+        'expiry_date': expiry_date
+    }
+    connected_clients.append(entry)
 
 @app.route('/auth')
 def auth():
@@ -139,11 +192,15 @@ def auth():
         response = requests.get(userinfo_endpoint, headers=headers)
         if response.status_code == 200:
             user_info = response.json()
-            return redirect(f'{os.getenv('FRONTEND_URI')}/auth?sub={user_info['sub']}')
+            sub = user_info['sub']
+            redirect_response = redirect(f'{os.getenv("FRONTEND_URI")}/')
+            redirect_response.set_cookie('sub', sub, max_age=session_duration_threshold, httponly=True, secure=False, samesite='Lax')
+            add_client_session(sub)
+            return redirect_response
         else:
             print("Failed to retrieve user info. Status Code:", response.status_code)
             print("Response:", response.text)
-                
+
     else:
         return redirect(f'{os.getenv('FRONTEND_URI')}/error')
 
